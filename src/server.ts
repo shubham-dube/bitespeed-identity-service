@@ -10,7 +10,7 @@ const startServer = async (): Promise<void> => {
     await prisma.$connect();
     logger.info('✅ Database connected successfully');
 
-    const server = app.listen(env.PORT, () => {
+    const server = app.listen(env.PORT, '0.0.0.0', () => {
       logger.info(`🚀 Server running in ${env.NODE_ENV} mode on port ${env.PORT}`);
       logger.info(`📍 Identify endpoint: POST http://localhost:${env.PORT}${env.API_PREFIX}/identify`);
     });
