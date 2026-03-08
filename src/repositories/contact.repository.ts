@@ -2,38 +2,27 @@ import { Contact, LinkPrecedence } from '@prisma/client';
 import prisma from '../config/database';
 import { CreateContactInput } from '../types/contact.types';
 
-/**
- * ContactRepository — The ONLY place in the codebase that talks to the DB.
- * No business logic here; just clean, reusable query methods.
- * This makes the service layer easy to unit-test (mock this class).
- */
 export class ContactRepository {
   /**
-   * Find all non-deleted contacts that match either the given email
-   * or phoneNumber. Only non-null values are used as filter conditions.
+   * Find all non-deleted contacts matching either email or phoneNumber.
    */
   async findByEmailOrPhone(
     email: string | null | undefined,
     phoneNumber: string | null | undefined,
   ): Promise<Contact[]> {
     const conditions: { email?: string; phoneNumber?: string }[] = [];
-
     if (email) conditions.push({ email });
     if (phoneNumber) conditions.push({ phoneNumber });
-
     if (conditions.length === 0) return [];
 
     return prisma.contact.findMany({
-      where: {
-        OR: conditions,
-        deletedAt: null,
-      },
+      where: { OR: conditions, deletedAt: null },
       orderBy: { createdAt: 'asc' },
     });
   }
 
   /**
-   * Find a single contact by its primary key.
+   * Find a single contact by ID (non-deleted).
    */
   async findById(id: number): Promise<Contact | null> {
     return prisma.contact.findFirst({
@@ -42,8 +31,24 @@ export class ContactRepository {
   }
 
   /**
-   * Fetch the primary contact and all its secondaries in one query.
-   * Returns the full cluster for a given primary ID.
+   * Given a list of IDs, fetch ONLY the ones that are still primary.
+   * This is the safe way to resolve primaries — it filters out any ID
+   * that has since been demoted to secondary by a concurrent request.
+   */
+  async findPrimaryContactsByIds(ids: number[]): Promise<Contact[]> {
+    if (ids.length === 0) return [];
+    return prisma.contact.findMany({
+      where: {
+        id: { in: ids },
+        linkPrecedence: LinkPrecedence.primary,
+        deletedAt: null,
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+  }
+
+  /**
+   * Fetch the primary + all its secondaries in one query.
    */
   async findClusterByPrimaryId(primaryId: number): Promise<Contact[]> {
     return prisma.contact.findMany({
@@ -70,16 +75,12 @@ export class ContactRepository {
   }
 
   /**
-   * Demote a primary contact to secondary (when two clusters merge).
-   * Points it at the winning primary and updates linkPrecedence.
-   * Uses a transaction to atomically reassign all of its children too.
+   * Demote a primary to secondary and re-point all its children.
+   * Runs inside a transaction for atomicity.
    */
-  async demoteToPrimary(
-    demotedId: number,
-    newPrimaryId: number,
-  ): Promise<void> {
+  async demoteToPrimary(demotedId: number, newPrimaryId: number): Promise<void> {
     await prisma.$transaction([
-      // Step 1: Demote the contact itself
+      // Demote the contact itself
       prisma.contact.update({
         where: { id: demotedId },
         data: {
@@ -88,33 +89,23 @@ export class ContactRepository {
           updatedAt: new Date(),
         },
       }),
-      // Step 2: Re-point all its existing secondaries to the new primary
+      // Re-point all its existing secondaries to the new primary
       prisma.contact.updateMany({
-        where: {
-          linkedId: demotedId,
-          deletedAt: null,
-        },
-        data: {
-          linkedId: newPrimaryId,
-          updatedAt: new Date(),
-        },
+        where: { linkedId: demotedId, deletedAt: null },
+        data: { linkedId: newPrimaryId, updatedAt: new Date() },
       }),
     ]);
   }
 
   /**
-   * Find all contacts that are secondaries of a given primary ID.
+   * Find all secondary contacts under a given primary ID.
    */
   async findSecondariesByPrimaryId(primaryId: number): Promise<Contact[]> {
     return prisma.contact.findMany({
-      where: {
-        linkedId: primaryId,
-        deletedAt: null,
-      },
+      where: { linkedId: primaryId, deletedAt: null },
       orderBy: { createdAt: 'asc' },
     });
   }
 }
 
-// Export a singleton instance
 export const contactRepository = new ContactRepository();
